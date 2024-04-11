@@ -1,0 +1,183 @@
+---
+title: "Mageck"
+author: "Dennis"
+date: "2024-04-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+1)  INSTALL AND LOAD THE LIBRARIES
+
+```{r cars}
+if(!"MAGeCKFlute" %in% installed.packages()) BiocManager::install("MAGeCKFlute")
+if(!"clusterProfiler" %in% installed.packages()) BiocManager::install("clusterProfiler")
+if(!"ggplot2" %in% installed.packages()) BiocManager::install("ggplot2")
+
+library(MAGeCKFlute)
+library(clusterProfiler)
+library(ggplot2)
+```
+
+2)  LOAD THE DATA FOR QC. DATA COMES FROM OPHIR SHALEM PAPER (2014) "Genome-Scale CRISPR-Cas9 Knockout Screening in Human Cells"
+
+# QAULITY CONTROL
+```{r}
+file4 = file.path(system.file("extdata", package = "MAGeCKFlute"),
+                  "testdata/countsummary.txt")
+countsummary = read.delim(file4, check.names = FALSE)
+head(countsummary)
+```
+
+```{r}
+# Gini index
+BarView(countsummary, x = "Label", y = "GiniIndex",
+        ylab = "Gini index", main = "Evenness of sgRNA reads")
+```
+
+```{r}
+# Missed sgRNAs
+countsummary$Missed = log10(countsummary$Zerocounts)
+BarView(countsummary, x = "Label", y = "Missed", fill = "#394E80",
+        ylab = "Log10 missed gRNAs", main = "Missed sgRNAs")
+```
+
+```{r}
+# Read mapping
+MapRatesView(countsummary)
+```
+
+
+
+3)  ANALYSIS OF MAGECK-RRA FOR IDENTIFICATION OF ESSENTIAL GENES
+
+# MAGECK-RRA
+For CRISPR/Cas9 screens with two experimental conditions, MAGeCK-RRA is available for identification of essential genes. In MAGeCK-RRA results, the sgRNA summary and gene summary file summarizes the statistical significance of positive selections and negative selections at sgRNA level and gene level.
+
+Gene Level:
+
+```{r}
+file1 = file.path(system.file("extdata", package = "MAGeCKFlute"),
+                  "testdata/rra.gene_summary.txt")
+gdatar = ReadRRA(file1)
+head(gdatar)
+```
+
+sgRNA Level:
+
+```{r}
+file2 = file.path(system.file("extdata", package = "MAGeCKFlute"),
+                  "testdata/rra.sgrna_summary.txt")
+sdatar = ReadsgRRA(file2)
+```
+
+```{r}
+head(sdatar)
+```
+
+To incorporate depmap data that are profiled in human cell lines, we will convert mouse gene names to homologous human genes for this dataset. Depmap is a cancer dataset profiling of genes. 
+
+```{r}
+gdatar$HumanGene = TransGeneID(gdatar$id, fromType = "symbol", toType = "symbol",
+                              fromOrg = "mmu", toOrg = "hsa")
+sdatar$HumanGene = TransGeneID(sdatar$Gene, fromType = "symbol", toType = "symbol",
+                              fromOrg = "mmu", toOrg = "hsa")
+```
+
+Remove Duplicated Genes
+```{r}
+idx = duplicated(gdatar$HumanGene)|is.na(gdatar$HumanGene)
+gdata = gdatar[!idx, ]
+gdatar
+```
+Omit essential genes from the data, as these might be false positives because their importance in cell viability. 
+
+```{r}
+gdatar = OmitCommonEssential(gdatar, symbol = "HumanGene")
+sdatar = OmitCommonEssential(sdatar, symbol = "HumanGene")
+```
+
+
+
+Visualization of negative selections and positive selections
+
+```{r}
+p2r = VolcanoView(gdatar, x = "Score", y = "FDR", Label = "id")
+print(p2r)
+```
+
+RANK PLOT
+
+Rank all the genes based on their scores and label genes in the rank plot.
+
+```{r}
+gdatar$Rank = rank(gdatar$Score)
+p1r = ScatterView(gdatar, x = "Rank", y = "Score", label = "id", 
+                 top = 5, auto_cut_y = TRUE, ylab = "Log2FC", 
+                 groups = c("top", "bottom"))
+print(p1r)
+```
+
+To Visualize top selected genes in Rank Format
+```{r}
+p2 = sgRankView(sdatar, top = 4, bottom = 4)
+print(p2)
+```
+
+# ANALYSIS USING MAGECK MLE
+
+The MAGeCK-VISPR (mageck mle) utilizes a maximum likelihood estimation (MLE) for robust identification of CRISPR screen hits. It outputs beta scores and the associated statistics in multiple conditions. The beta score describes how a gene is selected: a positive beta score indicates positive selection, and a negative beta score indicates negative selection. Using mageck mle, we removed the baseline effect (plasmid sample) from all the three samples, including Pmel1_Input (B16F10 cells without T cell co-culture), Pmel1_Ctrl (B16F10 cells co-cultured with control T cells), and Pmel1 (B16F10 cells co-cultured with antigen specific T cells).
+
+```{r}
+file3 = file.path(system.file("extdata", package = "MAGeCKFlute"),
+                  "testdata/mle.gene_summary.txt")
+# Read and visualize the file format
+gdata = ReadBeta(file3)
+head(gdata)
+```
+
+#NORMALIZATION OF BETA SCORES:
+
+Control all samples with a consistent cell cycle, using information about essential genes, which are those that are indespensible for cell survival.
+```{r}
+ctrlname = "Pmel1_Ctrl"
+treatname = "Pmel1"
+gdata$HumanGene = TransGeneID(gdata$Gene, fromType = "symbol", toType = "symbol",
+                              fromOrg = "mmu", toOrg = "hsa")
+
+gdata_cc = NormalizeBeta(gdata, id = "HumanGene", samples=c(ctrlname, treatname), 
+                         method="cell_cycle")
+head(gdata_cc)
+```
+
+#Positive selection and negative selection
+Rank based on the difference between treatment and control Beta's
+```{r}
+gdata_cc$Control = rowMeans(gdata_cc[,ctrlname, drop = FALSE])
+gdata_cc$Treatment = rowMeans(gdata_cc[,treatname, drop = FALSE])
+
+p1 = ScatterView(gdata_cc, "Control", "Treatment", label = "Gene", 
+                 auto_cut_diag = TRUE, display_cut = TRUE, 
+                 groups = c("top", "bottom"),
+                 toplabels = c("Pbrm1", "Brd7", "Arid2", "Jak1", "Stat1", "B2m"))
+print(p1)
+```
+
+We can compare this with the ranks from MageCK-RRA
+```{r}
+rankdata = gdata_cc$Treatment - gdata_cc$Control
+names(rankdata) = gdata_cc$Gene
+RankView(rankdata)
+```
+```{r}
+print(p1r)
+```
+
+# Identifying treatment specific genes from Mageck-MLE results
+```{r}
+p1 = ScatterView(gdata_cc, x="Pmel1_Ctrl", y="Pmel1", label = "Gene", 
+                 model = "ninesquare", top = 5, display_cut = TRUE, force = 2)
+print(p1)
+```
